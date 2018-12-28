@@ -18,6 +18,7 @@ import "time"
 
 // Much of this was based on ptprint.rb, linked from
 // http://www.undocprint.org/formats/page_description_languages/brother_p-touch
+// as well as the other docs linked from that page
 
 func write(f *os.File, b []byte) error {
 	n, err := f.Write(b)
@@ -73,6 +74,7 @@ type Status struct {
 func readStatus(f *os.File) (*Status, error) {
 	s := Status{}
 	var err error
+	// With a freshly-started printer, this often takes a couple of retries
 	for i := 0; i < 10; i++ {
 		err = binary.Read(f, binary.LittleEndian, &s)
 		if err == nil || err != io.EOF {
