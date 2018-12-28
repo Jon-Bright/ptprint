@@ -305,10 +305,20 @@ func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			line[lc] = byte(0)
 			lc++
 		}
-		write(h.printer, line)
+		err = write(h.printer, line)
+		if err != nil {
+			w.WriteHeader(502)
+			fmt.Fprintf(w, "Error writing print data: %v", err)
+			return
+		}
 	}
 	endPrint := []byte{0x1a}
-	write(h.printer, endPrint)
+	err = write(h.printer, endPrint)
+	if err != nil {
+		w.WriteHeader(502)
+		fmt.Fprintf(w, "Error writing end-of-print: %v", err)
+		return
+	}
 
 	htmltext := html.EscapeString(text)
 	htmltext = strings.Replace(htmltext, "\n", "<br />", -1)

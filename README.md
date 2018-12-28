@@ -16,6 +16,35 @@ go build ptprint.go
 
 Then visit `http://your-machine:40404`, enter text, click `Preview`, once happy, click `Print`.
 
+## udev
+
+This bit is entirely optional, but I've done the following to make the printer accessible by a normal user.  First, I created `/etc/udev/rules.d/99-printer.rules`, then I added this content:
+
+```
+SUBSYSTEM=="usbmisc", ATTRS{manufacturer}=="Brother", ATTRS{product}=="PT-2430PC", MODE="0666"
+```
+
+This will make the printer's device world-writeable, meaning any user can access it.
+
+### Auto-start
+
+Want to get really fancy?  Create `ptprint.sh`:
+
+```
+#!/bin/sh
+echo '/usr/bin/screen -S PTPRINT -d -m /path/to/ptprint/start_ptprint.sh' |/usr/bin/at now
+```
+
+And `start_ptprint.sh`:
+
+```
+#!/bin/sh
+cd /path/to/ptprint
+go run ptprint.go
+```
+
+Finally, add `RUN+="sudo -u <user> /path/to/ptprint/ptprint.sh"` to the previously-created `99-printer.rules`.  When the printer is connected or turned on, ptprint will start automatically.
+
 ## Weaknesses
 
 * Much of this is guesswork.  As far as I can tell, Brother doesn't produce a reference for this printer.
