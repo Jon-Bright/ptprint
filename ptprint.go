@@ -1,35 +1,37 @@
 package main
 
-import "bytes"
-import "encoding/base64"
-import "encoding/binary"
-import "errors"
-import "fmt"
-import "html"
-import "image"
-import _ "image/png"
-import "io"
-import "log"
-import "net/http"
-import "os"
-import "os/exec"
-import "strings"
-import "time"
-
 // Much of this was based on ptprint.rb, linked from
 // http://www.undocprint.org/formats/page_description_languages/brother_p-touch
 // as well as the other docs linked from that page
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
+	"flag"
+	"fmt"
+	"html"
+	"image"
+	_ "image/png"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+var dev = flag.String("dev", "/dev/usb/lp1", "The USB device of the label printer")
+var port = flag.Int("port", 40404, "The port the server should listen on")
+var convert = flag.String("convert", "/usr/bin/convert", "Path to ImageMagick's convert utility")
 
 func write(f *os.File, b []byte) error {
 	n, err := f.Write(b)
 	if n != len(b) || err != nil {
 		return fmt.Errorf("failed writing, wrote %d bytes, err %v", n, err)
 	}
-	// If I don't do this, I see regular EOFs when trying to read e.g. the printer's
-	// status reply.  I'm guessing it doesn't have the world's fastest processor.
-	// The actual delay here is plucked out of thin air, but is not painfully long
-	// but long enough to (apparently) work.
-	time.Sleep(time.Duration(len(b)) * time.Millisecond)
 	return nil
 }
 
@@ -81,7 +83,7 @@ func readStatus(f *os.File) (*Status, error) {
 			break
 		}
 		log.Printf("EOF reading status, try %d", i)
-		time.Sleep(time.Second)
+		time.Sleep(100 * time.Millisecond)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("Could not read status: %v", err)
@@ -211,7 +213,7 @@ func (h *previewHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	text := r.FormValue("text")
 
 	s := fmt.Sprintf("x%d", mediaWidthToPixels(h.mediaWidth))
-	c := exec.Command("convert", "+antialias", "-background", "white", "-fill", "black", "-size", s, "-gravity", "South", "label:"+text, "png:-")
+	c := exec.Command(*convert, "+antialias", "-background", "white", "-fill", "black", "-size", s, "-gravity", "South", "label:"+text, "png:-")
 	log.Printf("Preview running command '%v'", c)
 	png, err := c.Output()
 	if err != nil {
@@ -238,7 +240,7 @@ func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	text := r.FormValue("text")
 
 	s := fmt.Sprintf("x%d", mediaWidthToPixels(h.mediaWidth))
-	c := exec.Command("convert", "+antialias", "-background", "white", "-fill", "black", "-size", s, "-gravity", "South", "-rotate", "-90", "label:"+text, "png:-")
+	c := exec.Command(*convert, "+antialias", "-background", "white", "-fill", "black", "-size", s, "-gravity", "South", "-rotate", "-90", "label:"+text, "png:-")
 	log.Printf("Print running command '%v'", c)
 	png, err := c.Output()
 	if err != nil {
@@ -318,7 +320,8 @@ func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	f, mediaWidth, err := initPrinter("/dev/usb/lp1")
+	flag.Parse()
+	f, mediaWidth, err := initPrinter(*dev)
 	if err != nil {
 		log.Fatalf("Could not initialize printer: %v", err)
 	}
@@ -326,5 +329,5 @@ func main() {
 	http.HandleFunc("/", rootHandler)
 	http.Handle("/preview", &previewHandler{mediaWidth})
 	http.Handle("/print", &printHandler{f, mediaWidth})
-	http.ListenAndServe(":40404", nil)
+	http.ListenAndServe(fmt.Sprintf(":%d", *port), nil)
 }
