@@ -485,5 +485,6 @@ func main() {
 		log.Fatalf("Could not make print handler: %v", err)
 	}
 	http.Handle("/print", prih)
+	http.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.Dir("assets"))))
 	http.ListenAndServe(fmt.Sprintf(":%d", *port), nil)
 }
