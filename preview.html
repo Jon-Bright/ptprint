@@ -1,0 +1,15 @@
+<html>
+  <head>
+    <title>Label preview</title>
+  </head>
+  <body>
+    <div style="color:{{if .StatusOK}}green{{else}}red{{end}}">{{.Status}}</div>
+    <br />
+    <form action='/print' method='post'>
+      <input type='hidden' name='text' value='{{.Text}}' />
+      <img border=1 alt='{{.Text}}' src='data:image/png;base64,{{.Image}}' />
+      <br />
+      <input type='submit' value='Print' />
+    </form>
+  </body>
+</html>

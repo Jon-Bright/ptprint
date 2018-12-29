@@ -11,7 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"html"
+	"html/template"
 	"image"
 	_ "image/png"
 	"io"
@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -48,6 +47,26 @@ type Printer struct {
 // MediaWidth returns the width of the currently-inserted media in mm
 func (p *Printer) MediaWidth() int {
 	return p.mediaWidth
+}
+
+func (p *Printer) TransientError() TransientError {
+	return p.te
+}
+
+func (p *Printer) Status() string {
+	switch p.te {
+	case AllIsWell:
+		return fmt.Sprintf("Printer OK<br />%dmm tape inserted", p.mediaWidth)
+	case NoTapeCartridge:
+		return "No tape inserted!"
+	case TapeRanOut:
+		return "The tape has run out!"
+	case TapeJammed:
+		return "The tape is jammed!"
+	case CoverOpen:
+		return "The printer's cover is open!"
+	}
+	return "Unknown transient error, this should never happen"
 }
 
 func (p *Printer) rawWrite(b []byte) error {
@@ -259,12 +278,47 @@ func mediaWidthToPixels(w int) int {
 	}
 }
 
-func rootHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "<html>\n<head>\n<title>Label printer</title>\n<body>\n<form action='/preview' method='post'>Text to print:<textarea name='text' rows='4' cols='50'></textarea>\n<input type='submit' value='Preview'>\n")
+type rootHandler struct {
+	p *Printer
+	t *template.Template
+}
+
+func NewRootHandler(p *Printer) (*rootHandler, error) {
+	rh := rootHandler{}
+	rh.p = p
+	var err error
+	rh.t, err = template.ParseFiles("textform.html")
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing root template: %v", err)
+	}
+	return &rh, nil
+}
+
+func (rh *rootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	d := struct {
+		StatusOK bool
+		Status   template.HTML
+	}{
+		rh.p.TransientError() == AllIsWell,
+		template.HTML(rh.p.Status()),
+	}
+	rh.t.Execute(w, d)
 }
 
 type previewHandler struct {
 	p *Printer
+	t *template.Template
+}
+
+func NewPreviewHandler(p *Printer) (*previewHandler, error) {
+	ph := previewHandler{}
+	ph.p = p
+	var err error
+	ph.t, err = template.ParseFiles("preview.html")
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing preview template: %v", err)
+	}
+	return &ph, nil
 }
 
 func (h *previewHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -280,17 +334,34 @@ func (h *previewHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	htmltext := html.EscapeString(text)
-	htmltext = strings.Replace(htmltext, "\n", "<br />", -1)
-	fmt.Fprintf(w, "<html>\n<head>\n<title>Label preview</title>\n<body>\n<form action='/print' method='post'><input type='hidden' name='text' value='%s'>\n", html.EscapeString(text))
-	fmt.Fprintf(w, "<img border=1 alt='%s' src='data:image/png;base64,", htmltext)
-	fmt.Fprintf(w, "%s", base64.StdEncoding.EncodeToString(png))
-	fmt.Fprintf(w, "' />\n")
-	fmt.Fprintf(w, "<p>%s</p><input type='submit' value='Print'>\n", htmltext)
+	d := struct {
+		StatusOK bool
+		Status   template.HTML
+		Text     string
+		Image    string
+	}{
+		h.p.TransientError() == AllIsWell,
+		template.HTML(h.p.Status()),
+		text,
+		base64.StdEncoding.EncodeToString(png),
+	}
+	h.t.Execute(w, d)
 }
 
 type printHandler struct {
 	p *Printer
+	t *template.Template
+}
+
+func NewPrintHandler(p *Printer) (*printHandler, error) {
+	ph := printHandler{}
+	ph.p = p
+	var err error
+	ph.t, err = template.ParseFiles("print.html")
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing print template: %v", err)
+	}
+	return &ph, nil
 }
 
 func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -377,13 +448,18 @@ func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	htmltext := html.EscapeString(text)
-	htmltext = strings.Replace(htmltext, "\n", "<br />", -1)
-	fmt.Fprintf(w, "<html>\n<head>\n<title>Label print</title>\n<body>\n")
-	fmt.Fprintf(w, "<img border=1 alt='%s' src='data:image/png;base64,", htmltext)
-	fmt.Fprintf(w, "%s", base64.StdEncoding.EncodeToString(png))
-	fmt.Fprintf(w, "' />\n")
-	fmt.Fprintf(w, "<p>%s</p>\n", htmltext)
+	d := struct {
+		StatusOK bool
+		Status   template.HTML
+		Text     string
+		Image    string
+	}{
+		h.p.TransientError() == AllIsWell,
+		template.HTML(h.p.Status()),
+		text,
+		base64.StdEncoding.EncodeToString(png),
+	}
+	h.t.Execute(w, d)
 }
 
 func main() {
@@ -394,8 +470,20 @@ func main() {
 	}
 	log.Printf("Printer initialized successfully.  Media width is %dmm.\n", p.MediaWidth())
 	go p.run()
-	http.HandleFunc("/", rootHandler)
-	http.Handle("/preview", &previewHandler{p})
-	http.Handle("/print", &printHandler{p})
+	rh, err := NewRootHandler(p)
+	if err != nil {
+		log.Fatalf("Could not make root handler: %v", err)
+	}
+	http.Handle("/", rh)
+	preh, err := NewPreviewHandler(p)
+	if err != nil {
+		log.Fatalf("Could not make preview handler: %v", err)
+	}
+	http.Handle("/preview", preh)
+	prih, err := NewPrintHandler(p)
+	if err != nil {
+		log.Fatalf("Could not make print handler: %v", err)
+	}
+	http.Handle("/print", prih)
 	http.ListenAndServe(fmt.Sprintf(":%d", *port), nil)
 }

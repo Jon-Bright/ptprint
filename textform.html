@@ -1,0 +1,13 @@
+<html>
+  <head>
+    <title>Label printer</title>
+  </head>
+  <body>
+    <div style="color:{{if .StatusOK}}green{{else}}red{{end}}">{{.Status}}</div>
+    <br />
+    <form action='/preview' method='post'>
+      Text to print:<textarea name='text' rows='4' cols='50'></textarea>
+      <input type='submit' value='Preview'>
+    </form>
+  </body>
+</html>
