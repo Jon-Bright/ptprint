@@ -27,12 +27,40 @@ var dev = flag.String("dev", "/dev/usb/lp1", "The USB device of the label printe
 var port = flag.Int("port", 40404, "The port the server should listen on")
 var convert = flag.String("convert", "/usr/bin/convert", "Path to ImageMagick's convert utility")
 
-func write(f *os.File, b []byte) error {
-	n, err := f.Write(b)
+type TransientError int
+
+const (
+	AllIsWell TransientError = iota
+	NoTapeCartridge
+	TapeRanOut
+	TapeJammed
+	CoverOpen
+)
+
+type Printer struct {
+	f          *os.File
+	wc         chan []byte
+	ec         chan error
+	mediaWidth int
+	te         TransientError
+}
+
+// MediaWidth returns the width of the currently-inserted media in mm
+func (p *Printer) MediaWidth() int {
+	return p.mediaWidth
+}
+
+func (p *Printer) rawWrite(b []byte) error {
+	n, err := p.f.Write(b)
 	if n != len(b) || err != nil {
 		return fmt.Errorf("failed writing, wrote %d bytes, err %v", n, err)
 	}
 	return nil
+}
+
+func (p *Printer) Write(b []byte) error {
+	p.wc <- b
+	return <-p.ec
 }
 
 // Status is the somewhat insane mostly-zeroes status reply from the printer.
@@ -73,12 +101,14 @@ type Status struct {
 	ResZeroF      byte
 }
 
-func readStatus(f *os.File) (*Status, error) {
+func (p *Printer) readStatus() (*Status, error) {
 	s := Status{}
 	var err error
-	// With a freshly-started printer, this often takes a couple of retries
+	// The printer is slow and its USB interface is buggy.  This leads to
+	// it wantonly returning EOF rather than blocking, even when data will
+	// still be delivered.
 	for i := 0; i < 10; i++ {
-		err = binary.Read(f, binary.LittleEndian, &s)
+		err = binary.Read(p.f, binary.LittleEndian, &s)
 		if err == nil || err != io.EOF {
 			break
 		}
@@ -91,105 +121,133 @@ func readStatus(f *os.File) (*Status, error) {
 	return &s, nil
 }
 
-func checkStatus(s *Status) error {
+func checkStatus(s *Status) (TransientError, error) {
 	if s.PrintHeadMark != 0x80 {
-		return fmt.Errorf("wanted PrintHeadMark 0x80, got 0x%02X", s.PrintHeadMark)
+		return 0, fmt.Errorf("wanted PrintHeadMark 0x80, got 0x%02X", s.PrintHeadMark)
 	}
 	if s.Size != 32 {
-		return fmt.Errorf("wanted Size 32, got %d", s.Size)
+		return 0, fmt.Errorf("wanted Size 32, got %d", s.Size)
 	}
 	if s.ResFixed1 != 0x42 {
-		return fmt.Errorf("wanted Fixed1 0x42, got 0x%02X", s.ResFixed1)
+		return 0, fmt.Errorf("wanted Fixed1 0x42, got 0x%02X", s.ResFixed1)
 	}
 	if s.ResFixed2 != 0x30 {
-		return fmt.Errorf("wanted Fixed2 0x30, got 0x%02X", s.ResFixed2)
+		return 0, fmt.Errorf("wanted Fixed2 0x30, got 0x%02X", s.ResFixed2)
 	}
 	if s.ResHWVersion != 0x5a {
-		return fmt.Errorf("wanted ResHWVersion 0x5a, got 0x%02X", s.ResHWVersion)
+		return 0, fmt.Errorf("wanted ResHWVersion 0x5a, got 0x%02X", s.ResHWVersion)
 	}
 	if s.ResFixed3 != 0x30 {
-		return fmt.Errorf("wanted Fixed3 0x30, got 0x%02X", s.ResFixed3)
+		return 0, fmt.Errorf("wanted Fixed3 0x30, got 0x%02X", s.ResFixed3)
 	}
+	var te TransientError
 	if (s.Error1 & 0x01) != 0x00 {
-		return errors.New("no print media")
-	}
-	if (s.Error1 & 0x02) != 0x00 {
-		return errors.New("end of print media")
-	}
-	if (s.Error1 & 0x04) != 0x00 {
-		return errors.New("tape cutter jam")
-	}
-	if s.Error1 != 0x00 {
-		return fmt.Errorf("unknown Error1 %02X", s.Error1)
+		te = NoTapeCartridge
+	} else if (s.Error1 & 0x02) != 0x00 {
+		te = TapeRanOut
+	} else if (s.Error1 & 0x04) != 0x00 {
+		te = TapeJammed
+	} else if s.Error1 != 0x00 {
+		return 0, fmt.Errorf("unknown Error1 %02X", s.Error1)
 	}
 	if (s.Error2 & 0x04) != 0x00 {
-		return errors.New("transmission error")
+		return 0, errors.New("transmission error")
+	} else if (s.Error2 & 0x40) != 0x00 {
+		return 0, errors.New("cannot feed print media")
+	} else if (s.Error2 & 0x10) != 0x00 {
+		if te == AllIsWell {
+			te = CoverOpen
+		}
+	} else if s.Error2 != 0x00 {
+		return 0, fmt.Errorf("unknown ErrorInfo2 %02X", s.Error2)
 	}
-	if (s.Error2 & 0x10) != 0x00 {
-		return errors.New("cover open")
-	}
-	if (s.Error2 & 0x40) != 0x00 {
-		return errors.New("cannot feed print media")
-	}
-	if s.Error2 != 0x00 {
-		return fmt.Errorf("unknown ErrorInfo2 %02X", s.Error2)
-	}
-	return nil
+	return te, nil
 }
 
-func initPrinter(devicePath string) (*os.File, int, error) {
+func (p *Printer) run() {
+	for {
+		select {
+		case w := <-p.wc:
+			err := p.rawWrite(w)
+			p.ec <- err
+		case <-time.After(10 * time.Second):
+			var err error
+			p.te, err = p.checkStatus()
+			if err != nil {
+				log.Fatalf("Regular status inquiry failed: %v", err)
+			}
+			log.Printf("Status OK, TransientError %v, Media width %d", p.te, p.mediaWidth)
+		}
+	}
+}
+
+func (p *Printer) checkStatus() (TransientError, error) {
+	getStatus := []byte{0x1B, 'i', 'S'}
+	err := p.rawWrite(getStatus)
+	if err != nil {
+		return 0, fmt.Errorf("unable to ask printer for status: %v", err)
+	}
+
+	s, err := p.readStatus()
+	if err != nil {
+		return 0, fmt.Errorf("error reading printer status: %v", err)
+	}
+
+	te, err := checkStatus(s)
+	if err != nil {
+		return 0, fmt.Errorf("printer reports error: %v", err)
+	}
+	p.mediaWidth = int(s.MediaWidth)
+	return te, nil
+}
+
+func NewPrinter(devicePath string) (*Printer, error) {
 	f, err := os.OpenFile(devicePath, os.O_RDWR, 0)
 	if err != nil {
-		return nil, 0, fmt.Errorf("unable to open printer %s: %v", devicePath, err)
+		return nil, fmt.Errorf("unable to open printer %s: %v", devicePath, err)
 	}
+
+	p := Printer{}
+	p.f = f
+	p.wc = make(chan []byte, 1)
+	p.ec = make(chan error, 1)
 
 	start := make([]byte, 200)
 	reset := []byte{0x1B, '@'}
-	getStatus := []byte{0x1B, 'i', 'S'}
 	setAutoCut := []byte{0x1B, 'i', 'M', 0x48} // Auto cut, small feed amount
 	setFullCut := []byte{0x1B, 'i', 'K', 0x08} // Cut all the way through after every print
 	setCompression := []byte{'M', 0x02}        // Use RLE compression (which we won't actually do, but whatever)
 
-	err = write(f, start)
+	err = p.rawWrite(start)
 	if err != nil {
-		return nil, 0, fmt.Errorf("unable to start communication: %v", err)
+		return nil, fmt.Errorf("unable to start communication: %v", err)
 	}
 
-	err = write(f, reset)
+	err = p.rawWrite(reset)
 	if err != nil {
-		return nil, 0, fmt.Errorf("unable to reset printer: %v", err)
+		return nil, fmt.Errorf("unable to reset printer: %v", err)
 	}
 
-	err = write(f, getStatus)
+	p.te, err = p.checkStatus()
 	if err != nil {
-		return nil, 0, fmt.Errorf("unable to ask printer for status: %v", err)
+		return nil, fmt.Errorf("status problem: %v", err)
 	}
 
-	s, err := readStatus(f)
+	err = p.rawWrite(setAutoCut)
 	if err != nil {
-		return nil, 0, fmt.Errorf("error reading printer status: %v", err)
+		return nil, fmt.Errorf("unable to set auto-cut: %v", err)
 	}
 
-	err = checkStatus(s)
+	err = p.rawWrite(setFullCut)
 	if err != nil {
-		return nil, 0, fmt.Errorf("printer reports error: %v", err)
+		return nil, fmt.Errorf("unable to set full cut: %v", err)
 	}
 
-	err = write(f, setAutoCut)
+	err = p.rawWrite(setCompression)
 	if err != nil {
-		return nil, 0, fmt.Errorf("unable to set auto-cut: %v", err)
+		return nil, fmt.Errorf("unable to set compression: %v", err)
 	}
-
-	err = write(f, setFullCut)
-	if err != nil {
-		return nil, 0, fmt.Errorf("unable to set full cut: %v", err)
-	}
-
-	err = write(f, setCompression)
-	if err != nil {
-		return nil, 0, fmt.Errorf("unable to set compression: %v", err)
-	}
-	return f, int(s.MediaWidth), nil
+	return &p, nil
 }
 
 func mediaWidthToPixels(w int) int {
@@ -206,13 +264,13 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type previewHandler struct {
-	mediaWidth int
+	p *Printer
 }
 
 func (h *previewHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	text := r.FormValue("text")
 
-	s := fmt.Sprintf("x%d", mediaWidthToPixels(h.mediaWidth))
+	s := fmt.Sprintf("x%d", mediaWidthToPixels(h.p.MediaWidth()))
 	c := exec.Command(*convert, "+antialias", "-background", "white", "-fill", "black", "-size", s, "-gravity", "South", "label:"+text, "png:-")
 	log.Printf("Preview running command '%v'", c)
 	png, err := c.Output()
@@ -232,14 +290,13 @@ func (h *previewHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type printHandler struct {
-	printer    *os.File
-	mediaWidth int
+	p *Printer
 }
 
 func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	text := r.FormValue("text")
 
-	s := fmt.Sprintf("x%d", mediaWidthToPixels(h.mediaWidth))
+	s := fmt.Sprintf("x%d", mediaWidthToPixels(h.p.MediaWidth()))
 	c := exec.Command(*convert, "+antialias", "-background", "white", "-fill", "black", "-size", s, "-gravity", "South", "-rotate", "-90", "label:"+text, "png:-")
 	log.Printf("Print running command '%v'", c)
 	png, err := c.Output()
@@ -305,7 +362,7 @@ func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			line[lc] = byte(0)
 			lc++
 		}
-		err = write(h.printer, line)
+		err = h.p.Write(line)
 		if err != nil {
 			w.WriteHeader(502)
 			fmt.Fprintf(w, "Error writing print data: %v", err)
@@ -313,7 +370,7 @@ func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	endPrint := []byte{0x1a}
-	err = write(h.printer, endPrint)
+	err = h.p.Write(endPrint)
 	if err != nil {
 		w.WriteHeader(502)
 		fmt.Fprintf(w, "Error writing end-of-print: %v", err)
@@ -331,13 +388,14 @@ func (h *printHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	flag.Parse()
-	f, mediaWidth, err := initPrinter(*dev)
+	p, err := NewPrinter(*dev)
 	if err != nil {
 		log.Fatalf("Could not initialize printer: %v", err)
 	}
-	log.Printf("Printer initialized successfully.  Media width is %dmm.\n", mediaWidth)
+	log.Printf("Printer initialized successfully.  Media width is %dmm.\n", p.MediaWidth())
+	go p.run()
 	http.HandleFunc("/", rootHandler)
-	http.Handle("/preview", &previewHandler{mediaWidth})
-	http.Handle("/print", &printHandler{f, mediaWidth})
+	http.Handle("/preview", &previewHandler{p})
+	http.Handle("/print", &printHandler{p})
 	http.ListenAndServe(fmt.Sprintf(":%d", *port), nil)
 }
