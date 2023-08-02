@@ -82,7 +82,7 @@ func (p *Printer) Write(b []byte) error {
 	return <-p.ec
 }
 
-// Status is the somewhat insane mostly-zeroes status reply from the printer.
+// Status is the somewhat-silly mostly-zeroes status reply from the printer.
 // All of the fields prefixed "res" are marked "reserved" in the documentation,
 // although some of them have actual meanings.
 type Status struct {
