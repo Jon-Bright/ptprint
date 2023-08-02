@@ -28,22 +28,11 @@ This will make the printer's device world-writeable, meaning any user can access
 
 ### Auto-start
 
-Want to get really fancy?  Create `ptprint.sh`:
-
-```
-#!/bin/sh
-echo '/usr/bin/screen -S PTPRINT -d -m /path/to/ptprint/start_ptprint.sh' |/usr/bin/at now
-```
-
-And `start_ptprint.sh`:
-
-```
-#!/bin/sh
-cd /path/to/ptprint
-go run ptprint.go
-```
-
-Finally, add `RUN+="sudo -u <user> /path/to/ptprint/ptprint.sh"` to the previously-created `99-printer.rules`.  When the printer is connected or turned on, ptprint will start automatically.
+Want to get really fancy?  Use the included `ptprint.sh` and
+`start_ptprint.sh`. To use them, add
+`RUN+="sudo -u <user> /path/to/ptprint/ptprint.sh"` 
+to the previously-created `99-printer.rules`.  When the printer is
+connected or turned on, ptprint will start automatically.
 
 ## Weaknesses
 
