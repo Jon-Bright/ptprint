@@ -10,7 +10,7 @@ A Go server for printing labels on a Brother P-touch PT-2430PC label printer.
 ## Usage
 
 ```
-go build ptprint.go
+go build
 ./ptprint.go --dev=/dev/usb/lp1 --port=40404 --convert=/usr/bin/convert   # All flags optional, these are the defaults
 ```
 
