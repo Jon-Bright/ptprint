@@ -36,12 +36,20 @@ const (
 	CoverOpen
 )
 
+type HWVersion byte
+
+const (
+	PT2430PC HWVersion = 0x5a
+	PTP700   HWVersion = 0x67
+)
+
 type Printer struct {
 	f          *os.File
 	wc         chan []byte
 	ec         chan error
 	mediaWidth int
 	te         TransientError
+	hwVer      HWVersion
 }
 
 // MediaWidth returns the width of the currently-inserted media in mm
@@ -153,8 +161,13 @@ func checkStatus(s *Status) (TransientError, error) {
 	if s.ResFixed2 != 0x30 {
 		return 0, fmt.Errorf("wanted Fixed2 0x30, got 0x%02X", s.ResFixed2)
 	}
-	if s.ResHWVersion != 0x5a {
-		return 0, fmt.Errorf("wanted ResHWVersion 0x5a, got 0x%02X", s.ResHWVersion)
+	switch HWVersion(s.ResHWVersion) {
+	case PT2430PC:
+		log.Println("Hardware is a PT-2430PC")
+	case PTP700:
+		log.Println("Hardware is a PT-P700")
+	default:
+		return 0, fmt.Errorf("unknown ResHWVersion, got 0x%02X", s.ResHWVersion)
 	}
 	if s.ResFixed3 != 0x30 {
 		return 0, fmt.Errorf("wanted Fixed3 0x30, got 0x%02X", s.ResFixed3)
@@ -217,6 +230,7 @@ func (p *Printer) checkStatus() (TransientError, error) {
 		return 0, fmt.Errorf("printer reports error: %v", err)
 	}
 	p.mediaWidth = int(s.MediaWidth)
+	p.hwVer = HWVersion(s.ResHWVersion)
 	return te, nil
 }
 
