@@ -287,6 +287,8 @@ func mediaWidthToPixels(w int) int {
 	switch w {
 	case 9:
 		return 64
+	case 12:
+		return 96
 	default:
 		return 128
 	}
