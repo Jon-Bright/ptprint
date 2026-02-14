@@ -4,6 +4,12 @@ package main
 // http://www.undocprint.org/formats/page_description_languages/brother_p-touch
 // as well as the other docs linked from that page
 
+// 18mm tape
+// 292 = 45mm = 0.1541
+// 377 = 56.3mm = 0.1493
+// 398 = 60mm = 0.1507
+// 442 = 66mm = 0.1493
+
 import (
 	"bytes"
 	"encoding/base64"
@@ -248,6 +254,7 @@ func NewPrinter(devicePath string) (*Printer, error) {
 	start := make([]byte, 200)
 	reset := []byte{0x1B, '@'}
 	setAutoCut := []byte{0x1B, 'i', 'M', 0x48} // Auto cut, small feed amount
+	//setAutoCut := []byte{0x1B, 'i', 'M', 0x08} // Auto cut, small feed amount
 	setFullCut := []byte{0x1B, 'i', 'K', 0x08} // Cut all the way through after every print
 	setCompression := []byte{'M', 0x02}        // Use RLE compression (which we won't actually do, but whatever)
 
@@ -285,6 +292,8 @@ func NewPrinter(devicePath string) (*Printer, error) {
 
 func mediaWidthToPixels(w int) int {
 	switch w {
+	case 6:
+		return 48
 	case 9:
 		return 64
 	case 12:
